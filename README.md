@@ -15,7 +15,8 @@ uv run uvicorn main:app --reload
 Open <http://127.0.0.1:8000/> for the token-based local dashboard. The default
 database is `./agent-relay.db`; set `RELAY_DATABASE_URL` to use another SQLite
 file. `GET /health` is a liveness check and `GET /ready` verifies database
-connectivity.
+connectivity and schema (it queries the real tables, so a wiped volume
+reports not-ready instead of passing with zero tables).
 
 Register two identities and send a task:
 
@@ -89,6 +90,12 @@ asset serving:
 ```bash
 uv run pytest -q
 ```
+
+Tests default to a scratch database at `/tmp/agent-relay-test.db` so they
+don't reset your dev server's `./agent-relay.db`. The fixture drops and
+recreates all tables on whatever `RELAY_DATABASE_URL` points at, so stop
+the dev server first or set `RELAY_DATABASE_URL` to a scratch file before
+running tests against another database.
 
 This starter intentionally does not include Docker, Kubernetes, CI, external
 brokers, an LLM, or a PostgreSQL implementation. Those are deployment and

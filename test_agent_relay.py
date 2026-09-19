@@ -9,11 +9,15 @@ not from a Python lock.
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 
 # Default to a scratch DB so `pytest` never resets the dev server's
 # `./agent-relay.db`. Respect an explicit RELAY_DATABASE_URL/DATABASE_URL
-# (e.g. CI pointing at PostgreSQL), but otherwise isolate tests.
-os.environ.setdefault("RELAY_DATABASE_URL", "sqlite:////tmp/agent-relay-test.db")
+# (e.g. CI pointing at PostgreSQL), but otherwise isolate tests in the
+# platform's temporary directory.
+test_database = Path(tempfile.gettempdir()) / "agent-relay-test.db"
+os.environ.setdefault("RELAY_DATABASE_URL", f"sqlite:///{test_database.as_posix()}")
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -29,7 +33,7 @@ from storage import claim_one
 @pytest.fixture(autouse=True)
 def empty_database():
     # Resets whatever DB RELAY_DATABASE_URL points at. Defaults to the
-    # scratch /tmp file above; never run against a DB with data you need.
+    # scratch file above; never run against a DB with data you need.
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield
@@ -41,6 +45,42 @@ def register(client: TestClient, name: str) -> tuple[dict, dict[str, str]]:
     assert response.status_code == 201
     data = response.json()
     return data, {"Authorization": f"Bearer {data['token']}"}
+
+
+def test_acceptance_scenario_one_sender_sees_completed_result():
+    with TestClient(main.app) as client:
+        sender, sender_headers = register(client, "sender")
+        recipient, recipient_headers = register(client, "recipient")
+
+        sent = client.post(
+            "/api/v1/tasks",
+            headers=sender_headers,
+            json={"to": recipient["agent_id"], "input": "hello relay"},
+        )
+        assert sent.status_code == 201
+        task_id = sent.json()["task_id"]
+
+        claim = client.post(
+            "/api/v1/tasks/claim",
+            headers=recipient_headers,
+            json={"worker_id": "recipient-worker", "wait_seconds": 0},
+        )
+        assert claim.status_code == 200
+        claim_data = claim.json()
+        assert claim_data["task_id"] == task_id
+
+        completed = client.post(
+            f"/api/v1/tasks/{task_id}/complete",
+            headers=recipient_headers,
+            json={"claim_token": claim_data["claim_token"], "output": "HELLO RELAY"},
+        )
+        assert completed.status_code == 200
+        assert completed.json() == {"task_id": task_id, "status": "completed"}
+
+        result = client.get(f"/api/v1/tasks/{task_id}", headers=sender_headers)
+        assert result.status_code == 200
+        assert result.json()["status"] == "completed"
+        assert result.json()["output"] == "HELLO RELAY"
 
 
 def test_protocol_idempotency_terminal_retry_and_auth_boundary():

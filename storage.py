@@ -2,8 +2,8 @@
 
 Routes and the worker call these functions instead of issuing SQL directly.
 Claim, heartbeat, terminal submission, and recovery each use the same atomic
-SQLite transaction seam, which is the one area students will later replace by
-PostgreSQL row-locking operations.
+transaction seam. PostgreSQL claims add row-level locking while SQLite uses a
+serialized writer transaction.
 """
 
 from __future__ import annotations
@@ -144,12 +144,15 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
     with immediate_transaction() as db:
         now = utcnow()
         recover_expired_in_session(db, now)
-        task = db.scalar(
+        task_query = (
             select(Task)
             .where(Task.recipient_id == agent_id, Task.status == "queued")
             .order_by(Task.created_at, Task.id)
             .limit(1)
         )
+        if db.bind is not None and db.bind.dialect.name == "postgresql":
+            task_query = task_query.with_for_update(skip_locked=True)
+        task = db.scalar(task_query)
         if task is None:
             return None
         if task.attempt_count >= MAX_ATTEMPTS:
